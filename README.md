@@ -1,40 +1,24 @@
-# Reachout Tool (MailBlast UI)
+# Reachout Tool (GitHub Pages)
 
-This project now serves your existing `mailblast` HTML as the main app.
+Static MailBlast site for GitHub Pages deployment.
 
-## What it does
-- Sign in with Google
-- Load recipients (paste or CSV)
-- Compose email with merge tags
-- Attach one PDF
-- Send emails individually via Gmail API
+## Website source
+- `docs/index.html`
 
-## Run locally
-1. Create and activate a virtual environment:
-   ```bash
-   python3 -m venv .venv
-   source .venv/bin/activate
-   ```
-2. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
-3. Start server:
-   ```bash
-   python app.py
-   ```
-4. Open:
-   [http://localhost:5001](http://localhost:5001)
+## Deploy (GitHub Pages)
+1. Push to `main`.
+2. In repo settings, open `Pages`.
+3. Set:
+   - Source: `Deploy from a branch`
+   - Branch: `main`
+   - Folder: `/docs`
 
-If you want a different port:
-```bash
-PORT=5050 python app.py
-```
+Site URL:
+- `https://sahilsvachhani.github.io/Reachout_Tool/`
 
 ## Google OAuth setup
-In Google Cloud Console:
-1. Create/select a project.
-2. Enable Gmail API.
-3. Create OAuth Client ID (`Web application`).
-4. Add `http://localhost:5001` to Authorized JavaScript origins.
-5. Paste that Client ID into the app setup screen.
+In Google Cloud Console OAuth client:
+1. Enable Gmail API.
+2. Add authorized JavaScript origins:
+   - `https://sahilsvachhani.github.io`
+   - `http://localhost:5001` (optional local testing)
