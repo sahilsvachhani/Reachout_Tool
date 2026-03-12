@@ -369,6 +369,13 @@
           </div>
           <div class="prev-body" id="prevBody">—</div>
         </div>
+        <div style="margin-top:14px;max-width:320px">
+          <label>Send Interval (minutes)</label>
+          <input type="number" id="sendIntervalMinutes" min="0" step="0.5" value="2" />
+          <div style="margin-top:6px;font-size:11px;color:var(--text3);font-family:'DM Mono',monospace;">
+            Example: 2 means one email every 2 minutes. Use 0 to send without waiting.
+          </div>
+        </div>
         <div class="btn-row">
           <button class="btn btn-ghost" onclick="nextStep(-1)">← Back</button>
           <button class="btn btn-danger" style="margin-left:auto" onclick="nextStep(3)">🚀 Send All Emails</button>
@@ -381,6 +388,7 @@
           <div style="font-family:'Syne',sans-serif;font-weight:700;font-size:18px" id="sendTitle">Sending Emails…</div>
           <div style="font-family:'DM Mono',monospace;font-size:13px;color:var(--text2)" id="sendCount">0 / 0</div>
         </div>
+        <div id="sendIntervalInfo" style="margin-bottom:10px;font-size:11px;color:var(--text3);font-family:'DM Mono',monospace;text-transform:uppercase;letter-spacing:0.8px;"></div>
         <div class="prog-wrap"><div class="prog-fill" id="progFill"></div></div>
         <div id="doneBanner" style="display:none" class="done-banner">✅ Campaign complete! All emails sent.</div>
         <div class="stat-row" id="statRow" style="display:none">
@@ -430,12 +438,13 @@ let activeTab = 'paste';
 let attachedPdf = null; // { name, size, base64, mimeType }
 let sentCount = 0, failedCount = 0;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-const BASE_SEND_DELAY_MS = 1400;
-const SEND_JITTER_MS = 900;
+const DEFAULT_SEND_INTERVAL_MINUTES = 2;
 
 // ==================== INIT ====================
 window.addEventListener('load', () => {
   document.getElementById('currentOrigin').textContent = location.origin;
+  const savedInterval = localStorage.getItem('mb_send_interval_minutes');
+  document.getElementById('sendIntervalMinutes').value = savedInterval || String(DEFAULT_SEND_INTERVAL_MINUTES);
   if (PRECONFIGURED_CLIENT_ID) {
     CLIENT_ID = PRECONFIGURED_CLIENT_ID.trim();
     localStorage.setItem('mb_client_id', CLIENT_ID);
@@ -533,6 +542,10 @@ function nextStep(from) {
     if (!recipients.length) { showToast('⚠️ Add at least one recipient.'); return; }
     buildPreview(); navigateStep(3);
   } else if (from === 3) {
+    const sendIntervalMinutes = getSendIntervalMinutes();
+    if (sendIntervalMinutes === null) return;
+    localStorage.setItem('mb_send_interval_minutes', String(sendIntervalMinutes));
+
     const tpl = document.getElementById('emailSubject').value + document.getElementById('emailBody').value;
     const hasMergeTags = /\{\{[a-zA-Z_]+\}\}/.test(tpl);
     if (!hasMergeTags && recipients.length > 1) {
@@ -541,7 +554,8 @@ function nextStep(from) {
     if (attachedPdf && recipients.length > 1) {
       showToast('⚠️ Tip: PDF attachments can raise spam score. Keep content highly personalized.');
     }
-    document.getElementById('confirmBody').textContent = `Send ${recipients.length} individual email(s) from your Gmail account?`;
+    const intervalText = formatIntervalText(sendIntervalMinutes);
+    document.getElementById('confirmBody').textContent = `Send ${recipients.length} individual email(s) from your Gmail account with ${intervalText} between each email?`;
     document.getElementById('confirmModal').classList.add('show');
   }
 }
@@ -701,11 +715,21 @@ function applyRaw(text, rec) {
 
 // ==================== GMAIL API SENDING ====================
 async function startSending() {
+  const sendIntervalMinutes = getSendIntervalMinutes();
+  if (sendIntervalMinutes === null) {
+    navigateStep(3);
+    return;
+  }
+  const sendIntervalMs = Math.round(sendIntervalMinutes * 60 * 1000);
+  localStorage.setItem('mb_send_interval_minutes', String(sendIntervalMinutes));
+
   sentCount = 0; failedCount = 0;
   const total = recipients.length;
   document.getElementById('sendCount').textContent = `0 / ${total}`;
   document.getElementById('statRow').style.display = 'flex';
   document.getElementById('stTotal').textContent = total;
+  document.getElementById('sendIntervalInfo').textContent = `INTERVAL: ${formatIntervalText(sendIntervalMinutes)}`;
+  document.getElementById('sendTitle').textContent = 'Sending Emails…';
 
   const log = document.getElementById('emailLog');
   log.innerHTML = '';
@@ -733,9 +757,9 @@ async function startSending() {
     document.getElementById('stSent').textContent = sentCount;
     document.getElementById('stFailed').textContent = failedCount;
 
-    if (i < recipients.length - 1) {
-      const waitMs = BASE_SEND_DELAY_MS + Math.floor(Math.random() * SEND_JITTER_MS);
-      await sleep(waitMs);
+    if (i < recipients.length - 1 && sendIntervalMs > 0) {
+      setStatus(i, ok ? 'sent' : 'failed', `${ok ? 'Sent ✓' : 'Failed ✗'} · waiting ${formatIntervalText(sendIntervalMinutes)}`);
+      await sleep(sendIntervalMs);
     }
   }
 
@@ -859,6 +883,30 @@ function showToast(msg) {
   const t = document.getElementById('toast');
   t.textContent = msg; t.classList.add('show');
   setTimeout(()=>t.classList.remove('show'), 3200);
+}
+
+function getSendIntervalMinutes() {
+  const el = document.getElementById('sendIntervalMinutes');
+  const n = Number(el.value);
+  if (!Number.isFinite(n) || n < 0) {
+    showToast('⚠️ Send interval must be 0 or greater.');
+    return null;
+  }
+  if (n > 1440) {
+    showToast('⚠️ Send interval is too high. Max allowed is 1440 minutes.');
+    return null;
+  }
+  return n;
+}
+
+function formatIntervalText(minutes) {
+  const totalSeconds = Math.round(minutes * 60);
+  if (totalSeconds <= 0) return 'no wait';
+  if (totalSeconds % 60 === 0) {
+    const mins = totalSeconds / 60;
+    return `${mins} minute${mins === 1 ? '' : 's'}`;
+  }
+  return `${totalSeconds} seconds`;
 }
 
 function sleep(ms) {
