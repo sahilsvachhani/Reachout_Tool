@@ -421,12 +421,17 @@
 const PRECONFIGURED_CLIENT_ID = '63345306559-v45do0gudb52caaktlp8e7l5j0ak8bog.apps.googleusercontent.com';
 let CLIENT_ID = PRECONFIGURED_CLIENT_ID || localStorage.getItem('mb_client_id') || '';
 let accessToken = null;
+let senderEmail = '';
+let senderName = '';
 let currentStep = 1;
 let recipients = [];
 let csvHeaders = [];
 let activeTab = 'paste';
 let attachedPdf = null; // { name, size, base64, mimeType }
 let sentCount = 0, failedCount = 0;
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const BASE_SEND_DELAY_MS = 1400;
+const SEND_JITTER_MS = 900;
 
 // ==================== INIT ====================
 window.addEventListener('load', () => {
@@ -491,6 +496,8 @@ async function fetchUserInfo() {
       headers: { Authorization: 'Bearer ' + accessToken }
     });
     const info = await r.json();
+    senderEmail = info.email || '';
+    senderName = info.name || '';
     document.getElementById('userName').textContent = info.name || info.email;
     const av = document.getElementById('userAvatar');
     if (info.picture) av.innerHTML = `<img src="${info.picture}" />`;
@@ -526,6 +533,14 @@ function nextStep(from) {
     if (!recipients.length) { showToast('⚠️ Add at least one recipient.'); return; }
     buildPreview(); navigateStep(3);
   } else if (from === 3) {
+    const tpl = document.getElementById('emailSubject').value + document.getElementById('emailBody').value;
+    const hasMergeTags = /\{\{[a-zA-Z_]+\}\}/.test(tpl);
+    if (!hasMergeTags && recipients.length > 1) {
+      showToast('⚠️ Tip: add personalization tags like {{name}} to reduce spam risk.');
+    }
+    if (attachedPdf && recipients.length > 1) {
+      showToast('⚠️ Tip: PDF attachments can raise spam score. Keep content highly personalized.');
+    }
     document.getElementById('confirmBody').textContent = `Send ${recipients.length} individual email(s) from your Gmail account?`;
     document.getElementById('confirmModal').classList.add('show');
   }
@@ -601,9 +616,11 @@ function parseRecipients() {
     recipients = []; csvHeaders = ['email','name','company','role','city'];
     raw.split('\n').forEach(line => {
       const p = line.split(',').map(x=>x.trim());
-      if (!p[0]||!p[0].includes('@')) return;
-      recipients.push({ email:p[0], name:p[1]||'', company:p[2]||'', role:p[3]||'', city:p[4]||'' });
+      const email = normalizeEmail(p[0]);
+      if (!isValidEmail(email)) return;
+      recipients.push({ email, name:p[1]||'', company:p[2]||'', role:p[3]||'', city:p[4]||'' });
     });
+    recipients = dedupeRecipients(recipients);
   }
   renderRecTable();
 }
@@ -620,8 +637,10 @@ function handleCsv(event) {
         if (!row[0]||row.every(c=>!c)) return;
         const rec = {};
         csvHeaders.forEach((h,i)=>{ rec[h]=row[i]||''; });
-        if (rec.email&&rec.email.includes('@')) recipients.push(rec);
+        rec.email = normalizeEmail(rec.email || '');
+        if (isValidEmail(rec.email)) recipients.push(rec);
       });
+      recipients = dedupeRecipients(recipients);
       document.getElementById('csvStatus').style.display = '';
       document.getElementById('csvStatus').textContent = `✅ ${file.name} — ${recipients.length} recipients loaded.`;
       renderRecTable();
@@ -713,6 +732,11 @@ async function startSending() {
     document.getElementById('progFill').style.width = `${(done/total)*100}%`;
     document.getElementById('stSent').textContent = sentCount;
     document.getElementById('stFailed').textContent = failedCount;
+
+    if (i < recipients.length - 1) {
+      const waitMs = BASE_SEND_DELAY_MS + Math.floor(Math.random() * SEND_JITTER_MS);
+      await sleep(waitMs);
+    }
   }
 
   document.getElementById('sendTitle').textContent = 'Campaign Complete!';
@@ -745,40 +769,55 @@ async function sendViaGmail(to, subject, body) {
 }
 
 function buildMimePlain(to, subject, body) {
+  const safeTo = sanitizeHeaderValue(to);
+  const safeSubject = encodeHeaderValue(subject);
+  const bodyB64 = foldBase64(utf8ToBase64(body || ''));
   const msg = [
-    `To: ${to}`,
-    `Subject: ${subject}`,
+    `To: ${safeTo}`,
+    ...buildFromHeaders(),
+    `Subject: ${safeSubject}`,
+    `Date: ${new Date().toUTCString()}`,
+    `Message-ID: ${generateMessageId()}`,
     `MIME-Version: 1.0`,
     `Content-Type: text/plain; charset=UTF-8`,
+    `Content-Transfer-Encoding: base64`,
     ``,
-    body
+    bodyB64
   ].join('\r\n');
-  return btoa(unescape(encodeURIComponent(msg))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+  return toBase64Url(msg);
 }
 
 function buildMimeWithAttachment(to, subject, body, pdf) {
+  const safeTo = sanitizeHeaderValue(to);
+  const safeSubject = encodeHeaderValue(subject);
+  const safeFilename = sanitizeFilename(pdf.name || 'attachment.pdf');
+  const bodyB64 = foldBase64(utf8ToBase64(body || ''));
+  const attB64 = foldBase64((pdf.base64 || '').replace(/\s+/g, ''));
   const boundary = 'mb_boundary_' + Math.random().toString(36).slice(2);
   const parts = [
-    `To: ${to}`,
-    `Subject: ${subject}`,
+    `To: ${safeTo}`,
+    ...buildFromHeaders(),
+    `Subject: ${safeSubject}`,
+    `Date: ${new Date().toUTCString()}`,
+    `Message-ID: ${generateMessageId()}`,
     `MIME-Version: 1.0`,
     `Content-Type: multipart/mixed; boundary="${boundary}"`,
     ``,
     `--${boundary}`,
     `Content-Type: text/plain; charset=UTF-8`,
-    `Content-Transfer-Encoding: quoted-printable`,
+    `Content-Transfer-Encoding: base64`,
     ``,
-    body,
+    bodyB64,
     ``,
     `--${boundary}`,
-    `Content-Type: ${pdf.mimeType}; name="${pdf.name}"`,
+    `Content-Type: ${pdf.mimeType}; name="${safeFilename}"`,
     `Content-Transfer-Encoding: base64`,
-    `Content-Disposition: attachment; filename="${pdf.name}"`,
+    `Content-Disposition: attachment; filename="${safeFilename}"`,
     ``,
-    pdf.base64,
+    attB64,
     `--${boundary}--`
   ].join('\r\n');
-  return btoa(unescape(encodeURIComponent(parts))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+  return toBase64Url(parts);
 }
 
 function setStatus(i, status, msg) {
@@ -820,6 +859,79 @@ function showToast(msg) {
   const t = document.getElementById('toast');
   t.textContent = msg; t.classList.add('show');
   setTimeout(()=>t.classList.remove('show'), 3200);
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function normalizeEmail(v) {
+  return String(v || '').trim().toLowerCase();
+}
+
+function isValidEmail(v) {
+  const email = normalizeEmail(v);
+  return EMAIL_RE.test(email) && !/[\r\n]/.test(email);
+}
+
+function dedupeRecipients(list) {
+  const seen = new Set();
+  const out = [];
+  list.forEach(rec => {
+    const email = normalizeEmail(rec.email || '');
+    if (!isValidEmail(email) || seen.has(email)) return;
+    seen.add(email);
+    out.push({ ...rec, email });
+  });
+  return out;
+}
+
+function sanitizeHeaderValue(v) {
+  return String(v || '').replace(/[\r\n]+/g, ' ').trim();
+}
+
+function utf8ToBase64(text) {
+  return btoa(unescape(encodeURIComponent(text)));
+}
+
+function foldBase64(s, n = 76) {
+  return (s.match(new RegExp(`.{1,${n}}`, 'g')) || []).join('\r\n');
+}
+
+function toBase64Url(rawText) {
+  return utf8ToBase64(rawText).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+}
+
+function encodeHeaderValue(v) {
+  const clean = sanitizeHeaderValue(v);
+  if (!clean) return '';
+  if (/^[\x20-\x7E]+$/.test(clean)) return clean;
+  return `=?UTF-8?B?${utf8ToBase64(clean)}?=`;
+}
+
+function generateMessageId() {
+  return `<${Date.now()}.${Math.random().toString(36).slice(2)}@mailblast.local>`;
+}
+
+function sanitizeFilename(name) {
+  const cleaned = sanitizeHeaderValue(name).replace(/["\\]/g, '');
+  return cleaned || 'attachment.pdf';
+}
+
+function buildFromHeaders() {
+  const headers = [];
+  const safeEmail = sanitizeHeaderValue(senderEmail).replace(/[<>]/g, '');
+  if (!safeEmail || !safeEmail.includes('@')) return headers;
+
+  const safeName = sanitizeHeaderValue(senderName);
+  const fromVal = safeName
+    ? `${encodeHeaderValue(safeName)} <${safeEmail}>`
+    : safeEmail;
+
+  headers.push(`From: ${fromVal}`);
+  headers.push(`Reply-To: ${safeEmail}`);
+  headers.push(`X-Mailer: MailBlast`);
+  return headers;
 }
 
 // CSV drag-drop
