@@ -375,6 +375,13 @@
           <div style="margin-top:6px;font-size:11px;color:var(--text3);font-family:'DM Mono',monospace;">
             Example: 2 means one email every 2 minutes. Use 0 to send without waiting.
           </div>
+          <div class="check" style="margin-top:10px">
+            <input id="includeOptOut" type="checkbox" checked />
+            <label for="includeOptOut" style="margin:0;font-weight:600">Add opt-out line</label>
+          </div>
+          <div style="margin-top:4px;font-size:11px;color:var(--text3);font-family:'DM Mono',monospace;">
+            Adds: "reply unsubscribe and I won't email again."
+          </div>
         </div>
         <div class="btn-row">
           <button class="btn btn-ghost" onclick="nextStep(-1)">← Back</button>
@@ -445,6 +452,8 @@ window.addEventListener('load', () => {
   document.getElementById('currentOrigin').textContent = location.origin;
   const savedInterval = localStorage.getItem('mb_send_interval_minutes');
   document.getElementById('sendIntervalMinutes').value = savedInterval || String(DEFAULT_SEND_INTERVAL_MINUTES);
+  const savedOptOut = localStorage.getItem('mb_include_opt_out');
+  document.getElementById('includeOptOut').checked = savedOptOut === null ? true : savedOptOut === '1';
   if (PRECONFIGURED_CLIENT_ID) {
     CLIENT_ID = PRECONFIGURED_CLIENT_ID.trim();
     localStorage.setItem('mb_client_id', CLIENT_ID);
@@ -545,17 +554,31 @@ function nextStep(from) {
     const sendIntervalMinutes = getSendIntervalMinutes();
     if (sendIntervalMinutes === null) return;
     localStorage.setItem('mb_send_interval_minutes', String(sendIntervalMinutes));
+    localStorage.setItem('mb_include_opt_out', document.getElementById('includeOptOut').checked ? '1' : '0');
 
     const tpl = document.getElementById('emailSubject').value + document.getElementById('emailBody').value;
     const hasMergeTags = /\{\{[a-zA-Z_]+\}\}/.test(tpl);
-    if (!hasMergeTags && recipients.length > 1) {
-      showToast('⚠️ Tip: add personalization tags like {{name}} to reduce spam risk.');
+
+    const risk = assessCampaignRisk({
+      subject: document.getElementById('emailSubject').value,
+      body: document.getElementById('emailBody').value,
+      recipientsCount: recipients.length,
+      hasAttachment: !!attachedPdf,
+      intervalMinutes: sendIntervalMinutes,
+      hasMergeTags,
+    });
+
+    if (risk.blocks.length) {
+      showToast(`⛔ ${risk.blocks[0]}`);
+      return;
     }
-    if (attachedPdf && recipients.length > 1) {
-      showToast('⚠️ Tip: PDF attachments can raise spam score. Keep content highly personalized.');
+    if (risk.warnings.length) {
+      showToast(`⚠️ ${risk.warnings[0]}`);
     }
+
     const intervalText = formatIntervalText(sendIntervalMinutes);
-    document.getElementById('confirmBody').textContent = `Send ${recipients.length} individual email(s) from your Gmail account with ${intervalText} between each email?`;
+    const warningNote = risk.warnings.length ? ` Deliverability warnings: ${risk.warnings.length}.` : '';
+    document.getElementById('confirmBody').textContent = `Send ${recipients.length} individual email(s) from your Gmail account with ${intervalText} between each email?${warningNote}`;
     document.getElementById('confirmModal').classList.add('show');
   }
 }
@@ -574,6 +597,10 @@ function navigateStep(n) {
 // ==================== COMPOSE ====================
 document.getElementById('emailBody').addEventListener('input', updateStats);
 document.getElementById('emailSubject').addEventListener('input', updateStats);
+document.getElementById('includeOptOut').addEventListener('change', () => {
+  localStorage.setItem('mb_include_opt_out', document.getElementById('includeOptOut').checked ? '1' : '0');
+  if (currentStep === 3) updatePrev();
+});
 function updateStats() {
   const body = document.getElementById('emailBody').value;
   const tags = [...new Set((( body + document.getElementById('emailSubject').value).match(/\{\{[a-zA-Z_]+\}\}/g)||[]))];
@@ -701,7 +728,8 @@ function updatePrev() {
   const rec = recipients[+document.getElementById('prevSelect').value]; if (!rec) return;
   document.getElementById('prevTo').textContent = rec.email + (rec.name?` (${rec.name})`:'');
   document.getElementById('prevSubject').innerHTML = applyMerge(document.getElementById('emailSubject').value, rec, true);
-  document.getElementById('prevBody').innerHTML = applyMerge(document.getElementById('emailBody').value, rec, true);
+  const bodyWithFooter = applyOptOutFooter(document.getElementById('emailBody').value);
+  document.getElementById('prevBody').innerHTML = applyMerge(bodyWithFooter, rec, true);
 }
 function applyMerge(text, rec, hi) {
   return text.replace(/\{\{([a-zA-Z_]+)\}\}/g, (m,k)=>{
@@ -743,7 +771,7 @@ async function startSending() {
   for (let i = 0; i < recipients.length; i++) {
     const rec = recipients[i];
     const subj = applyRaw(document.getElementById('emailSubject').value, rec);
-    const body = applyRaw(document.getElementById('emailBody').value, rec);
+    const body = applyOptOutFooter(applyRaw(document.getElementById('emailBody').value, rec));
     setStatus(i, 'sending', 'Sending…');
     document.getElementById(`log-${i}`).scrollIntoView({ behavior:'smooth', block:'nearest' });
 
@@ -796,6 +824,8 @@ function buildMimePlain(to, subject, body) {
   const safeTo = sanitizeHeaderValue(to);
   const safeSubject = encodeHeaderValue(subject);
   const bodyB64 = foldBase64(utf8ToBase64(body || ''));
+  const htmlB64 = foldBase64(utf8ToBase64(textToHtml(body || '')));
+  const altBoundary = 'mb_alt_' + Math.random().toString(36).slice(2);
   const msg = [
     `To: ${safeTo}`,
     ...buildFromHeaders(),
@@ -803,10 +833,21 @@ function buildMimePlain(to, subject, body) {
     `Date: ${new Date().toUTCString()}`,
     `Message-ID: ${generateMessageId()}`,
     `MIME-Version: 1.0`,
+    `Content-Type: multipart/alternative; boundary="${altBoundary}"`,
+    ``,
+    `--${altBoundary}`,
     `Content-Type: text/plain; charset=UTF-8`,
     `Content-Transfer-Encoding: base64`,
     ``,
-    bodyB64
+    bodyB64,
+    ``,
+    `--${altBoundary}`,
+    `Content-Type: text/html; charset=UTF-8`,
+    `Content-Transfer-Encoding: base64`,
+    ``,
+    htmlB64,
+    ``,
+    `--${altBoundary}--`
   ].join('\r\n');
   return toBase64Url(msg);
 }
@@ -816,8 +857,10 @@ function buildMimeWithAttachment(to, subject, body, pdf) {
   const safeSubject = encodeHeaderValue(subject);
   const safeFilename = sanitizeFilename(pdf.name || 'attachment.pdf');
   const bodyB64 = foldBase64(utf8ToBase64(body || ''));
+  const htmlB64 = foldBase64(utf8ToBase64(textToHtml(body || '')));
   const attB64 = foldBase64((pdf.base64 || '').replace(/\s+/g, ''));
-  const boundary = 'mb_boundary_' + Math.random().toString(36).slice(2);
+  const mixedBoundary = 'mb_mixed_' + Math.random().toString(36).slice(2);
+  const altBoundary = 'mb_alt_' + Math.random().toString(36).slice(2);
   const parts = [
     `To: ${safeTo}`,
     ...buildFromHeaders(),
@@ -825,21 +868,33 @@ function buildMimeWithAttachment(to, subject, body, pdf) {
     `Date: ${new Date().toUTCString()}`,
     `Message-ID: ${generateMessageId()}`,
     `MIME-Version: 1.0`,
-    `Content-Type: multipart/mixed; boundary="${boundary}"`,
+    `Content-Type: multipart/mixed; boundary="${mixedBoundary}"`,
     ``,
-    `--${boundary}`,
+    `--${mixedBoundary}`,
+    `Content-Type: multipart/alternative; boundary="${altBoundary}"`,
+    ``,
+    `--${altBoundary}`,
     `Content-Type: text/plain; charset=UTF-8`,
     `Content-Transfer-Encoding: base64`,
     ``,
     bodyB64,
     ``,
-    `--${boundary}`,
+    `--${altBoundary}`,
+    `Content-Type: text/html; charset=UTF-8`,
+    `Content-Transfer-Encoding: base64`,
+    ``,
+    htmlB64,
+    ``,
+    `--${altBoundary}--`,
+    ``,
+    `--${mixedBoundary}`,
     `Content-Type: ${pdf.mimeType}; name="${safeFilename}"`,
     `Content-Transfer-Encoding: base64`,
     `Content-Disposition: attachment; filename="${safeFilename}"`,
     ``,
     attB64,
-    `--${boundary}--`
+    ``,
+    `--${mixedBoundary}--`
   ].join('\r\n');
   return toBase64Url(parts);
 }
@@ -909,6 +964,49 @@ function formatIntervalText(minutes) {
   return `${totalSeconds} seconds`;
 }
 
+function assessCampaignRisk({ subject, body, recipientsCount, hasAttachment, intervalMinutes, hasMergeTags }) {
+  const warnings = [];
+  const blocks = [];
+  const text = `${subject}\n${body}`.toLowerCase();
+  const linkCount = ((body || '').match(/https?:\/\//gi) || []).length;
+  const spammyTerms = [
+    'urgent',
+    'act now',
+    'limited time',
+    'guaranteed',
+    'free',
+    'risk-free',
+    'winner',
+    'click here',
+    'buy now',
+  ];
+  const hitSpamTerms = spammyTerms.filter(term => text.includes(term));
+
+  if (!hasMergeTags && recipientsCount > 1) {
+    blocks.push('Bulk send without personalization is blocked. Add tags like {{name}}.');
+  }
+  if (recipientsCount > 8 && intervalMinutes < 1) {
+    blocks.push('For 9+ recipients, use at least a 1-minute interval to lower spam risk.');
+  }
+
+  if (hasAttachment && recipientsCount > 1) warnings.push('Attachment + bulk sends have higher spam risk.');
+  if (linkCount > 2) warnings.push('Too many links in one email can trigger spam filters.');
+  if ((subject || '').trim().length < 4) warnings.push('Very short subject lines can look suspicious.');
+  if ((body || '').trim().length < 40) warnings.push('Very short body text can look low-trust.');
+  if (hitSpamTerms.length) warnings.push(`Spam-trigger wording detected: ${hitSpamTerms.slice(0,2).join(', ')}.`);
+  if (recipientsCount > 20) warnings.push('Large cold batches reduce deliverability; keep batches small.');
+
+  return { warnings, blocks };
+}
+
+function applyOptOutFooter(body) {
+  const include = document.getElementById('includeOptOut')?.checked;
+  if (!include) return body || '';
+  const current = String(body || '');
+  if (/unsubscribe|opt[\s-]?out/i.test(current)) return current;
+  return `${current}\n\n---\nIf you'd prefer not to receive emails from me, reply \"unsubscribe\" and I won't email again.`;
+}
+
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
@@ -958,7 +1056,8 @@ function encodeHeaderValue(v) {
 }
 
 function generateMessageId() {
-  return `<${Date.now()}.${Math.random().toString(36).slice(2)}@mailblast.local>`;
+  const domain = (senderEmail || '').split('@')[1] || 'gmail.com';
+  return `<${Date.now()}.${Math.random().toString(36).slice(2)}@${domain}>`;
 }
 
 function sanitizeFilename(name) {
@@ -978,8 +1077,20 @@ function buildFromHeaders() {
 
   headers.push(`From: ${fromVal}`);
   headers.push(`Reply-To: ${safeEmail}`);
-  headers.push(`X-Mailer: MailBlast`);
   return headers;
+}
+
+function textToHtml(text) {
+  const escaped = String(text || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+  const paragraphs = escaped
+    .split(/\n\n+/)
+    .map(p => `<p style="margin:0 0 14px 0;line-height:1.6">${p.replace(/\n/g, '<br>')}</p>`)
+    .join('\n');
+  return `<!DOCTYPE html><html><head><meta charset="UTF-8"></head><body style="font-family:Arial,sans-serif;font-size:14px;color:#222;margin:0;padding:0">${paragraphs}</body></html>`;
 }
 
 // CSV drag-drop
