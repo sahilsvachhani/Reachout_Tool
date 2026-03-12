@@ -247,7 +247,7 @@
         Sign in with Google
       </button>
       <div style="margin-top:16px;">
-        <button class="btn-ghost btn" style="font-size:12px;padding:8px 16px;" onclick="showSetup()">⚙️ Change Client ID</button>
+        <button id="changeClientBtn" class="btn-ghost btn" style="font-size:12px;padding:8px 16px;" onclick="showSetup()">⚙️ Change Client ID</button>
       </div>
     </div>
 
@@ -417,7 +417,9 @@
 
 <script>
 // ==================== STATE ====================
-let CLIENT_ID = localStorage.getItem('mb_client_id') || '';
+// Set this once and deploy; users will not be asked to paste Client ID manually.
+const PRECONFIGURED_CLIENT_ID = '63345306559-v45do0gudb52caaktlp8e7l5j0ak8bog.apps.googleusercontent.com';
+let CLIENT_ID = PRECONFIGURED_CLIENT_ID || localStorage.getItem('mb_client_id') || '';
 let accessToken = null;
 let currentStep = 1;
 let recipients = [];
@@ -429,6 +431,13 @@ let sentCount = 0, failedCount = 0;
 // ==================== INIT ====================
 window.addEventListener('load', () => {
   document.getElementById('currentOrigin').textContent = location.origin;
+  if (PRECONFIGURED_CLIENT_ID) {
+    CLIENT_ID = PRECONFIGURED_CLIENT_ID.trim();
+    localStorage.setItem('mb_client_id', CLIENT_ID);
+    document.getElementById('changeClientBtn').style.display = 'none';
+    showMainApp();
+    return;
+  }
   if (CLIENT_ID) {
     showMainApp();
   }
